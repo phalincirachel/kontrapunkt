@@ -474,6 +474,22 @@
             82: { hard: false, relaxTier: 1, pdf: '?54' },
             83: { hard: false, relaxTier: 1, pdf: '?56' },
 
+            // Formerly implicit defaults (soft, relaxTier=2) – now explicit.
+            1:  { hard: false, relaxTier: 2, pdf: '?37' },
+            4:  { hard: false, relaxTier: 1, pdf: '?59' },
+            5:  { hard: false, relaxTier: 2, pdf: '?54' },
+            7:  { hard: false, relaxTier: 2, pdf: '?57' },
+            8:  { hard: false, relaxTier: 2, pdf: '?58' },
+            9:  { hard: false, relaxTier: 1, pdf: '?57' },
+            10: { hard: false, relaxTier: 1, pdf: '?30/?57' },
+            11: { hard: false, relaxTier: 1, pdf: '?27' },
+            12: { hard: false, relaxTier: 2, pdf: '?44' },
+            18: { hard: false, relaxTier: 0, pdf: '?53' },
+            21: { hard: false, relaxTier: 0, pdf: '?40' },
+            28: { hard: false, relaxTier: 2, pdf: '?28' },
+            30: { hard: false, relaxTier: 2, pdf: '?30' },
+            55: { hard: false, relaxTier: 2, pdf: '?25' },
+
             25: { hard: false, relaxTier: 0, pdf: '?32' },
             26: { hard: false, relaxTier: 0, pdf: '?31' },
             32: { hard: false, relaxTier: 0, pdf: '?32' },
@@ -541,9 +557,10 @@
             return out;
         })();
 
-        // Some soft rules must remain distinct within a step because family-level
-        // deduplication hides exactly the structural faults we are trying to reduce.
-        const STEP_DISTINCT_SOFT_RULES = new Set([31, 43]);
+        // Now that dedup keys by rule-ID (not family), STEP_DISTINCT_SOFT_RULES
+        // is redundant – every rule is inherently step-distinct.  Kept for
+        // backward compatibility; the set itself has no runtime effect anymore.
+        const STEP_DISTINCT_SOFT_RULES = new Set([26, 31, 43]);
 
         const RULE_PDF_MAP = {
             1: ['sec37'], 2: ['sec54'], 3: ['sec42', 'sec44'], 4: ['sec59'], 5: ['sec54'],
@@ -1020,13 +1037,13 @@
                     : null;
                 const voiceKey = Number.isFinite(v.voice) ? `voice:${v.voice}` : null;
                 const discriminator = voicePair || subcheck || source || voiceKey || 'generic';
+                // Key by step + ruleId (+ voicePair where applicable).
+                // Previous family-level grouping suppressed distinct soft-rule
+                // signals at the same step.  Per-rule keying preserves frequency
+                // information that scoring and ranking depend on.
                 const key = voicePair
                     ? `${step}:rule:${id}:pair:${voicePair}`
-                    : (RULE_POLICY[id]?.hard)
-                        ? `${step}:hard:${id}`
-                        : (STEP_DISTINCT_SOFT_RULES.has(id)
-                            ? `${step}:rule:${id}`
-                            : `${step}:${family}`);
+                    : `${step}:rule:${id}`;
                 const existing = groups.get(key);
                 const w = RULE_WEIGHTS[id] ?? 10;
                 if (!existing) {
@@ -1097,35 +1114,55 @@
         }
 
         // Result scoring function for multi-start comparison.
+        // Now computes hardPenalty and fatalCount inline so that every
+        // consumer (cadence tournament, optimizer, etc.) ranks
+        // candidates with the same priority order as betterMeta.
         function scoreResult(result, relaxLevel, relaxedFatalSet = null) {
             const deduped = deduplicateViolations(result.violations);
             let weighted = 0;
             let hardCount = 0;
+            let hardPenalty = 0;
+            let fatalCount = 0;
+            let hasFatalAbsolute = false;
             for (const v of deduped) {
                 const id = ruleIdOf(v);
                 const isHard = HARD_RULES.has(id) && !relaxedFatalSet?.has(id);
                 if (isHard && FATAL_RULES.has(id)) {
-                    return { weighted: Infinity, hardCount: Infinity, aesthetic: 0, key: 'FATAL', betterThan: () => false, violations: result.violations };
+                    hasFatalAbsolute = true;
+                    fatalCount++;
                 }
                 const w = RULE_WEIGHTS[id] || 0;
                 if (isHard) {
                     hardCount += 1;
                     weighted += (w * 2.0);
+                    const tier = RULE_POLICY[id]?.fatalTier ?? 'absolute';
+                    if (tier === 'absolute') {
+                        hardPenalty = Infinity;
+                    } else {
+                        hardPenalty += w * 0.4;
+                    }
                 } else {
                     weighted += w;
                 }
             }
+            if (hasFatalAbsolute) {
+                weighted = Infinity;
+                hardPenalty = Infinity;
+            }
+            // Also count fatals from raw violations (not just deduped)
+            fatalCount = countFatalViolations(result.violations);
             const aesthetic = result.aestheticScore || 0;
             const key = `w=${Math.round(weighted)} n=${hardCount} a=${Math.round(aesthetic)}`;
 
             return {
                 weighted, hardCount, aesthetic, key,
+                hardPenalty, fatalCount,
                 violations: result.violations,
+                // Delegate to betterMeta so that all comparison paths
+                // use the same priority chain:
+                // hardPenalty > fatalCount > weighted > hardCount > aesthetic.
                 betterThan(other) {
-                    if (!other) return true;
-                    if (this.weighted !== other.weighted) return this.weighted < other.weighted;
-                    if (this.hardCount !== other.hardCount) return this.hardCount < other.hardCount;
-                    return this.aesthetic > other.aesthetic;
+                    return betterMeta(this, other);
                 }
             };
         }
@@ -1640,54 +1677,7 @@
         }
 
         // Detailed violation logger
-        function logDetailedViolations(violations) {
-            if (!violations || violations.length === 0) return;
-            const groups = {};
-            violations.forEach(v => {
-                const id = ruleIdOf(v);
-                const step = (typeof v === 'object') ? v.step : '?';
-                if (!groups[id]) groups[id] = [];
-                groups[id].push(step);
-            });
-
-            // Sort by weight/importance
-            const ids = Object.keys(groups).sort((a, b) => (RULE_WEIGHTS[b] || 0) - (RULE_WEIGHTS[a] || 0));
-
-            let html = "<b>Top Violations Details:</b><br>";
-            ids.slice(0, 5).forEach(id => {
-                const steps = groups[id].slice(0, 10).sort((a, b) => a - b).join(', ') + (groups[id].length > 10 ? '...' : '');
-                const name = RULE_NAMES[id] || `Rule ${id}`;
-                html += `- ${name} (${groups[id].length}x): steps [${steps}]<br>`;
-            });
-            log(html, 'warning');
-        }
-
-        function logDetailedViolationsCatalog(violations) {
-            if (!violations || violations.length === 0) return;
-            const groups = {};
-            violations.forEach(v => {
-                const id = ruleIdOf(v);
-                const step = (typeof v === 'object') ? v.step : '?';
-                if (!groups[id]) groups[id] = [];
-                groups[id].push(step);
-            });
-
-            const ids = Object.keys(groups).sort((a, b) => (RULE_WEIGHTS[b] || 0) - (RULE_WEIGHTS[a] || 0));
-            let html = "<b>Top Violations Details (Catalog):</b><br>";
-            ids.slice(0, 7).forEach(id => {
-                const ruleId = parseInt(id, 10);
-                const meta = getRuleCatalogEntry(ruleId);
-                const steps = groups[id].slice(0, 10).sort((a, b) => a - b).join(', ') + (groups[id].length > 10 ? '...' : '');
-                const name = meta?.name || RULE_NAMES[id] || `Rule ${id}`;
-                const priority = meta?.priority || 'soft';
-                const pdfTxt = (meta?.pdfRefs?.length ? meta.pdfRefs.join(',') : 'sec??');
-                const fam = meta?.family || 'misc';
-                const checker = meta?.checkerId || 'unknown';
-                const subTxt = (meta?.subchecks?.length ? meta.subchecks.slice(0, 3).join('|') : 'n/a');
-                html += `- #${id} [${priority}] ${name} (${groups[id].length}x): sec=[${pdfTxt}] family=${fam} checker=${checker} sub=[${subTxt}] steps=[${steps}]<br>`;
-            });
-            log(html, 'warning');
-        }
+        // logDetailedViolations / logDetailedViolationsCatalog: canonical definitions below (line ~2199).
         function stepToBarBeat(step) {
             return { bar: Math.floor(step / 4) + 1, beat: (step % 4) + 1 };
         }
@@ -3066,13 +3056,15 @@
                 const cadenceDeadlineMs = Number.isFinite(solveDeadlineMs)
                     ? Math.max(Date.now() + 1500, solveDeadlineMs - fallbackReserveMs)
                     : Infinity;
+                // Consistent sort comparator derived from betterMeta
+                // (same priority chain: hardPenalty > fatalCount > weighted > hardCount > aesthetic).
                 const compareMeta = (a, b) => {
                     if (!a && !b) return 0;
                     if (!a) return 1;
                     if (!b) return -1;
-                    if (a.hardCount !== b.hardCount) return a.hardCount - b.hardCount;
-                    if (a.weighted !== b.weighted) return a.weighted - b.weighted;
-                    return (b.aesthetic || 0) - (a.aesthetic || 0);
+                    if (betterMeta(a, b)) return -1;
+                    if (betterMeta(b, a)) return 1;
+                    return 0;
                 };
                 const runCadenceAttempt = async (cadence, optionBudgetMs) => {
                     if (Number.isFinite(cadenceDeadlineMs) && Date.now() >= cadenceDeadlineMs) {
@@ -4716,10 +4708,12 @@
                 const isOnsetStep = (mode === 'sp1') ? ((step % 4) === 0)
                     : (mode === 'sp2') ? ((step % 2) === 0)
                         : true;
-                const inCadenceWindow = step >= (totalSteps - 8);
+                const inCadenceWindow = step >= (totalSteps - 4);
                 let penalty = 0;
 
                 // Prefer melodic movement over repeated tones on real onsets.
+                // Cadence window narrowed from 8 to 4 steps so that
+                // repetitions in the penultimate measure are still penalised.
                 if (isOnsetStep && note === prev && !inCadenceWindow) {
                     penalty += (mode === 'sp3') ? 16 : 22;
                 }
@@ -4986,7 +4980,8 @@
                     if (!Array.isArray(domain) || domain.length <= 1) return domain;
                     if (prevNote === null || prevNote === undefined) return domain;
                     if (!isVoiceOnsetStep(step, mode)) return domain;
-                    const inCadenceWindow = step >= (totalSteps - 8);
+                    // Narrowed from 8 to 4 to match tightened Rule-26 window.
+                    const inCadenceWindow = step >= (totalSteps - 4);
                     if (step <= 0 || inCadenceWindow) return domain;
                     const filtered = domain.filter(n => n === null || n !== prevNote);
                     return filtered.length > 0 ? filtered : domain;
@@ -5387,12 +5382,17 @@
                                     const goalPressure = (!hardOnlyPhase && goalPressureEnabled)
                                         ? this.harmonicGoalPressure(testGrid, s, totalSteps, tonic)
                                         : 0;
-                                    const melodicPressureFactor = hardOnlyPhase ? 0.65 : 0.55;
-                                    const goalPressureFactor = softFocusPhase ? 0.08 : 0.0;
+                                    // Pressure factors reduced to tiebreaker level so that
+                                    // rule-violation penalties always dominate the beam ranking.
+                                    // This aligns the search objective with the final scoring
+                                    // (betterMeta), preventing "locally better, globally worse".
+                                    const melodicPressureFactor = hardOnlyPhase ? 0.15 : 0.12;
+                                    const tonalPressureFactor = 0.15;
+                                    const goalPressureFactor = softFocusPhase ? 0.02 : 0.0;
                                     const effectiveCost = (
                                         searchPenalty +
                                         (melodicPressure * melodicPressureFactor) +
-                                        tonalPressure +
+                                        (tonalPressure * tonalPressureFactor) +
                                         (goalPressure * goalPressureFactor)
                                     ) * costMultiplier;
                                     const stepAesthetic = prevChord
@@ -5400,7 +5400,7 @@
                                         : 0;
                                     const currentAesthetic = (path.aesthetic || 0) + stepAesthetic;
                                     const boundedStepAesthetic = Math.max(-120, Math.min(160, stepAesthetic));
-                                    const aestheticSearchFactor = hardOnlyPhase ? 0.0 : (softFocusPhase ? 0.40 : 0.22);
+                                    const aestheticSearchFactor = hardOnlyPhase ? 0.0 : (softFocusPhase ? 0.08 : 0.05);
                                     const jitterScale = 1.0 - (s / totalSteps) * 0.5;
                                     let primaryCost = effectiveCost - (boundedStepAesthetic * aestheticSearchFactor);
                                     primaryCost += (randomFn() - 0.5) * jitter * jitterScale * costMultiplier;
@@ -6610,8 +6610,9 @@
                             // SP2: Only penalize repetition on downbeat (allow held notes)
                             if (config[v] === 'sp2' && isDownbeat) vList.push(26);
                             if (config[v] === 'sp1' && isDownbeat) vList.push(26);
-                            // SP3: Note repeat allowed only as anticipation in penultimate measure
-                            if (config[v] === 'sp3' && idx < totalSteps - 8) vList.push(26);
+                            // SP3: Note repeat – allow anticipation only in final measure (4 steps),
+                            // not the full penultimate + final window (was 8 steps).
+                            if (config[v] === 'sp3' && idx < totalSteps - 4) vList.push(26);
                         }
 
                         if (config[v] === 'sp1') {
@@ -9130,103 +9131,45 @@
                     }
                 }
 
+                // ─── REFERENCE-CF HARD RESCUE (consolidated) ───
+                // Combines the former "escalating strict search" and
+                // "deterministic hard-rescue" into one profile-driven loop.
                 if (isReferenceCf && (
                     !bestMeta ||
                     !Number.isFinite(bestMeta.hardPenalty) ||
                     bestMeta.hardPenalty > 0 ||
                     (bestMeta.fatalCount || 0) > 0
                 )) {
-                    log(`Reference-CF rescue: escalating strict search before any hard fallback.`, 'warning');
-                    const rescueProfiles = [
-                        { beamMul: 1.25, runs: 2, jitter: Math.max(0, (searchOpts.jitter ?? 0) - 6) },
-                        { beamMul: 1.55, runs: 2, jitter: Math.max(0, (searchOpts.jitter ?? 0) - 10) }
+                    log(`Reference-CF hard rescue: escalating beam + jitter sweep.`, 'warning');
+                    const baseJitter = searchOpts.jitter ?? 0;
+                    const hardRescueProfiles = [
+                        // Guided-skeleton runs (wider beam, reduced jitter)
+                        { beamMul: 1.25, jitter: Math.max(0, baseJitter - 6), anchor: 'guided', budgetMs: STRICT_REF_RESCUE_BUDGET_MS, seedSalt: 0x9e3779b9, runIdx: 0 },
+                        { beamMul: 1.25, jitter: Math.max(0, baseJitter - 6), anchor: 'guided', budgetMs: STRICT_REF_RESCUE_BUDGET_MS, seedSalt: 0x9e3779b9, runIdx: 1 },
+                        { beamMul: 1.55, jitter: Math.max(0, baseJitter - 10), anchor: 'guided', budgetMs: STRICT_REF_RESCUE_BUDGET_MS, seedSalt: 0x9e3779ba, runIdx: 0 },
+                        { beamMul: 1.55, jitter: Math.max(0, baseJitter - 10), anchor: 'guided', budgetMs: STRICT_REF_RESCUE_BUDGET_MS, seedSalt: 0x9e3779ba, runIdx: 1 },
                     ];
-                    rescueLoop: for (const rp of rescueProfiles) {
-                        const rescueBeam = Math.max(beam, Math.min(220, Math.floor(beam * rp.beamMul)));
-                        for (let r = 0; r < rp.runs; r++) {
-                            if (stopRequested) break rescueLoop;
-                            if (isHardTimeout()) break rescueLoop;
-                            maybeWarnTargetRuntime();
-                            totalRuns++;
-                            const runSeed = composeRunSeed(
-                                searchOpts.seedBase ?? 1337,
-                                cantusHash ^ 0x9e3779b9,
-                                Math.floor(rp.beamMul * 1000),
-                                r
-                            );
-                            const remainingRuntimeMs = Math.max(4000, GENERATE_HARD_TIMEOUT_MS - (Date.now() - optimizerStartMs) - 250);
-                            const runOpts = {
-                                ...searchOpts,
-                                relaxSet: new Set(),
-                                relaxLevel: 0,
-                                runsPerMask: 1,
-                                jitter: rp.jitter,
-                                randomFn: createSeededRng(runSeed),
-                                runSeed,
-                                allowRepairHardFallback: false,
-                                searchPhase: 'hard_only',
-                                enableSoftPolish: false,
-                                disableCadencePrefill: true,
-                                fixedDownbeats: null,
-                                guidedDownbeats: fixedDownbeatSkeleton || null,
-                                maxRunMs: Math.max(3500, Math.min(STRICT_REF_RESCUE_BUDGET_MS, remainingRuntimeMs))
-                            };
-                            const solver = new MixedSolver(rescueBeam, runOpts);
-                            const result = await solver.solve(sVoice, config);
-                            if (!result) continue;
-                            const hardPenalty = hardPenaltyOnly(
-                                toRuleIdList(result.violations),
-                                new Set()
-                            );
-                            const meta = scoreResult(result, 0);
-                            meta.hardPenalty = Number.isFinite(hardPenalty) ? hardPenalty : Infinity;
-                            meta.fatalCount = countFatalViolations(result.violations);
-                            meta.relaxedRules = [];
-                            if (betterMeta(meta, bestMeta)) {
-                                bestResult = result;
-                                bestMeta = meta;
-                                bestRunId = totalRuns;
-                                bestRelaxSet = [];
-                                log(`Reference rescue run ${bestRunId}: NEW BEST hard=${Math.round(meta.hardPenalty)}, w=${Math.round(meta.weighted)}, n=${meta.hardCount}`, 'success');
-                            }
-                            if (meta.hardPenalty === 0 && meta.fatalCount === 0) {
-                                log(`Reference-CF rescue found strict hard-feasible result.`, 'success');
-                                break rescueLoop;
-                            }
-                            await new Promise(r2 => setTimeout(r2, 0));
-                        }
+                    // Fixed-skeleton deterministic runs (only if skeleton available)
+                    if (fixedDownbeatSkeleton) {
+                        hardRescueProfiles.push(
+                            { beamMul: 1.55, jitter: 0, anchor: 'fixed', budgetMs: 9000,  seedSalt: 0x13579bdf, runIdx: 0 },
+                            { beamMul: 1.70, jitter: 1, anchor: 'fixed', budgetMs: 10000, seedSalt: 0x2468ace1, runIdx: 0 },
+                            { beamMul: 1.85, jitter: 0, anchor: 'fixed', budgetMs: 11000, seedSalt: 0x9e3779b9, runIdx: 0 }
+                        );
                     }
-                }
 
-                if (
-                    isReferenceCf &&
-                    fixedDownbeatSkeleton &&
-                    (
-                        !bestMeta ||
-                        !Number.isFinite(bestMeta.hardPenalty) ||
-                        bestMeta.hardPenalty > 0 ||
-                        (bestMeta.fatalCount || 0) > 0
-                    )
-                ) {
-                    log(`Reference-CF deterministic hard-rescue: fixed skeleton + low-jitter strict runs.`, 'warning');
-                    const deterministicRescueRuns = [
-                        { jitter: 0, beamMul: 1.55, seedSalt: 0x13579bdf, runBudgetMs: 9000 },
-                        { jitter: 1, beamMul: 1.70, seedSalt: 0x2468ace1, runBudgetMs: 10000 },
-                        { jitter: 0, beamMul: 1.85, seedSalt: 0x9e3779b9, runBudgetMs: 11000 }
-                    ];
-                    deterministicRescueLoop: for (let i = 0; i < deterministicRescueRuns.length; i++) {
-                        const rp = deterministicRescueRuns[i];
-                        if (stopRequested) break;
-                        if (isHardTimeout()) break;
+                    hardRescueLoop: for (let i = 0; i < hardRescueProfiles.length; i++) {
+                        const rp = hardRescueProfiles[i];
+                        if (stopRequested || isHardTimeout()) break;
                         maybeWarnTargetRuntime();
                         totalRuns++;
                         const runSeed = composeRunSeed(
                             searchOpts.seedBase ?? 1337,
                             cantusHash ^ rp.seedSalt,
-                            i + 1,
-                            0
+                            Math.floor(rp.beamMul * 1000),
+                            rp.runIdx
                         );
-                        const remainingRuntimeMs = Math.max(4500, GENERATE_HARD_TIMEOUT_MS - (Date.now() - optimizerStartMs) - 250);
+                        const remainingRuntimeMs = Math.max(3500, GENERATE_HARD_TIMEOUT_MS - (Date.now() - optimizerStartMs) - 250);
                         const runOpts = {
                             ...searchOpts,
                             relaxSet: new Set(),
@@ -9239,19 +9182,16 @@
                             searchPhase: 'hard_only',
                             enableSoftPolish: false,
                             disableCadencePrefill: true,
-                            fixedDownbeats: fixedDownbeatSkeleton,
-                            guidedDownbeats: null,
-                            maxRunMs: Math.max(4500, Math.min(rp.runBudgetMs, remainingRuntimeMs))
+                            fixedDownbeats: rp.anchor === 'fixed' ? fixedDownbeatSkeleton : null,
+                            guidedDownbeats: rp.anchor === 'guided' ? (fixedDownbeatSkeleton || null) : null,
+                            maxRunMs: Math.max(3500, Math.min(rp.budgetMs, remainingRuntimeMs))
                         };
                         const rescueBeam = Math.max(beam, Math.min(240, Math.floor(beam * rp.beamMul)));
                         const solver = new MixedSolver(rescueBeam, runOpts);
                         const result = await solver.solve(sVoice, config);
                         if (!result) continue;
 
-                        const hardPenalty = hardPenaltyOnly(
-                            toRuleIdList(result.violations),
-                            new Set()
-                        );
+                        const hardPenalty = hardPenaltyOnly(toRuleIdList(result.violations), new Set());
                         const meta = scoreResult(result, 0);
                         meta.hardPenalty = Number.isFinite(hardPenalty) ? hardPenalty : Infinity;
                         meta.fatalCount = countFatalViolations(result.violations);
@@ -9262,11 +9202,11 @@
                             bestMeta = meta;
                             bestRunId = totalRuns;
                             bestRelaxSet = [];
-                            log(`Reference deterministic rescue run ${bestRunId}: NEW BEST hard=${Math.round(meta.hardPenalty)}, w=${Math.round(meta.weighted)}, n=${meta.hardCount}`, 'success');
+                            log(`Hard rescue run ${bestRunId} [${rp.anchor}]: NEW BEST hard=${Math.round(meta.hardPenalty)}, w=${Math.round(meta.weighted)}, n=${meta.hardCount}`, 'success');
                         }
-                        if (meta.hardPenalty === 0 && meta.fatalCount === 0) {
-                            log(`Reference-CF deterministic hard-rescue found strict hard-feasible result.`, 'success');
-                            break deterministicRescueLoop;
+                        if (meta.hardPenalty === 0 && (meta.fatalCount || 0) === 0) {
+                            log(`Reference-CF hard rescue found strict feasible result.`, 'success');
+                            break hardRescueLoop;
                         }
                         await new Promise(r2 => setTimeout(r2, 0));
                     }
@@ -9518,34 +9458,49 @@
                     }
                 }
 
+                // ─── LAST-RESORT FALLBACK (consolidated) ───
+                // Three escalation tiers in one loop:
+                //   1. Strict direct search (no skeleton, hard_only)
+                //   2. Fixed-skeleton rescue (if available)
+                //   3. Emergency: allow hard-rule fallback (may violate)
                 if (!bestResult && !stopRequested) {
-                    log(`Failsafe: running direct strict search without skeleton anchor.`, 'warning');
-                    const fallbackSeeds = [
-                        123456,
-                        composeRunSeed(searchOpts.seedBase ?? 1337, cantusHash ^ 0x243f6a88, 0, 0)
+                    log(`Last-resort fallback: escalating through strict → skeleton → emergency.`, 'warning');
+                    const lastResortProfiles = [
+                        { label: 'strict',    beamMin: beam,  jitter: Math.max(0, searchOpts.jitter ?? 20), searchPhase: 'hard_only', anchor: 'guided', hardFallback: false, budgetMs: 7000,  seedSalt: 0x243f6a88 },
+                        { label: 'strict-b',  beamMin: beam,  jitter: Math.max(0, searchOpts.jitter ?? 20), searchPhase: 'hard_only', anchor: 'guided', hardFallback: false, budgetMs: 7000,  seedSalt: 0x243f6a89 },
                     ];
-                    for (const fsSeed of fallbackSeeds) {
-                        if (stopRequested) break;
+                    if (fixedDownbeatSkeleton) {
+                        lastResortProfiles.push(
+                            { label: 'skeleton', beamMin: 90,   jitter: Math.min(6, searchOpts.jitter ?? 6), searchPhase: 'hard_only', anchor: 'fixed',  hardFallback: false, budgetMs: 10000, seedSalt: 0x7f4a7c15 }
+                        );
+                    }
+                    lastResortProfiles.push(
+                        { label: 'emergency', beamMin: 100,  jitter: Math.max(4, searchOpts.jitter ?? 12), searchPhase: 'balanced',  anchor: 'guided', hardFallback: true,  budgetMs: 12000, seedSalt: 0x4f1bbcdc }
+                    );
+
+                    for (const lrp of lastResortProfiles) {
+                        if (bestResult || stopRequested || isHardTimeout()) break;
                         maybeWarnTargetRuntime();
                         totalRuns++;
+                        const runSeed = composeRunSeed(searchOpts.seedBase ?? 1337, cantusHash ^ lrp.seedSalt, 0, 0);
                         const remainingRuntimeMs = Math.max(3000, GENERATE_HARD_TIMEOUT_MS - (Date.now() - optimizerStartMs) - 250);
                         const runOpts = {
                             ...searchOpts,
                             relaxSet: new Set(),
                             relaxLevel: 0,
                             runsPerMask: 1,
-                            jitter: Math.max(0, searchOpts.jitter ?? 20),
-                            randomFn: createSeededRng(fsSeed),
-                            runSeed: fsSeed,
-                            allowRepairHardFallback: false,
-                            searchPhase: 'hard_only',
+                            jitter: lrp.jitter,
+                            randomFn: createSeededRng(runSeed),
+                            runSeed,
+                            allowRepairHardFallback: lrp.hardFallback,
+                            searchPhase: lrp.searchPhase,
                             enableSoftPolish: false,
                             disableCadencePrefill: true,
-                            fixedDownbeats: null,
-                            guidedDownbeats: fixedDownbeatSkeleton || null,
-                            maxRunMs: Math.max(4000, Math.min(7000, remainingRuntimeMs))
+                            fixedDownbeats: lrp.anchor === 'fixed' ? fixedDownbeatSkeleton : null,
+                            guidedDownbeats: lrp.anchor === 'guided' ? (fixedDownbeatSkeleton || null) : null,
+                            maxRunMs: Math.max(4000, Math.min(lrp.budgetMs, remainingRuntimeMs))
                         };
-                        const solver = new MixedSolver(beam, runOpts);
+                        const solver = new MixedSolver(Math.max(beam, lrp.beamMin), runOpts);
                         const result = await solver.solve(sVoice, config);
                         if (!result) continue;
 
@@ -9554,93 +9509,21 @@
                         meta.hardPenalty = Number.isFinite(hardPenalty) ? hardPenalty : Infinity;
                         meta.fatalCount = countFatalViolations(result.violations);
                         meta.relaxedRules = [];
+                        if (lrp.hardFallback) meta.rejected = true;
 
-                        if (betterMeta(meta, bestMeta)) {
-                            bestResult = result;
-                            bestMeta = meta;
-                            bestRunId = totalRuns;
-                            bestRelaxSet = [];
-                            log(`Failsafe run ${bestRunId}: NEW BEST hard=${Math.round(meta.hardPenalty)}, w=${Math.round(meta.weighted)}, n=${meta.hardCount}`, 'success');
+                        if (lrp.hardFallback || betterMeta(meta, bestMeta)) {
+                            if (lrp.hardFallback && bestResult) {
+                                // Emergency: only override if nothing better exists
+                            } else {
+                                bestResult = result;
+                                bestMeta = meta;
+                                bestRunId = totalRuns;
+                                bestRelaxSet = [];
+                                log(`Last-resort [${lrp.label}] run ${bestRunId}: NEW BEST hard=${Math.round(meta.hardPenalty)}, w=${Math.round(meta.weighted)}, n=${meta.hardCount}`, lrp.hardFallback ? 'warning' : 'success');
+                            }
                         }
-                        if (meta.hardPenalty === 0 && meta.fatalCount === 0) break;
+                        if (meta.hardPenalty === 0 && (meta.fatalCount || 0) === 0) break;
                         await new Promise(r => setTimeout(r, 0));
-                    }
-                }
-
-                if (!bestResult && fixedDownbeatSkeleton && !stopRequested) {
-                    log(`Reference fallback: forcing fixed downbeat skeleton for one strict rescue run.`, 'warning');
-                    totalRuns++;
-                    const runSeed = composeRunSeed(searchOpts.seedBase ?? 1337, cantusHash ^ 0x7f4a7c15, 0, 0);
-                    const remainingRuntimeMs = Math.max(3000, GENERATE_HARD_TIMEOUT_MS - (Date.now() - optimizerStartMs) - 250);
-                    const runOpts = {
-                        ...searchOpts,
-                        relaxSet: new Set(),
-                        relaxLevel: 0,
-                        runsPerMask: 1,
-                        jitter: Math.max(0, Math.min(6, searchOpts.jitter ?? 6)),
-                        randomFn: createSeededRng(runSeed),
-                        runSeed,
-                        allowRepairHardFallback: false,
-                        searchPhase: 'hard_only',
-                        enableSoftPolish: false,
-                        disableCadencePrefill: true,
-                        fixedDownbeats: fixedDownbeatSkeleton,
-                        guidedDownbeats: null,
-                        maxRunMs: Math.max(4000, Math.min(10000, remainingRuntimeMs))
-                    };
-                    const solver = new MixedSolver(Math.max(beam, 90), runOpts);
-                    const result = await solver.solve(sVoice, config);
-                    if (result) {
-                        const hardPenalty = hardPenaltyOnly(toRuleIdList(result.violations), new Set());
-                        const meta = scoreResult(result, 0);
-                        meta.hardPenalty = Number.isFinite(hardPenalty) ? hardPenalty : Infinity;
-                        meta.fatalCount = countFatalViolations(result.violations);
-                        meta.relaxedRules = [];
-                        if (betterMeta(meta, bestMeta)) {
-                            bestResult = result;
-                            bestMeta = meta;
-                            bestRunId = totalRuns;
-                            bestRelaxSet = [];
-                            log(`Reference fallback run ${bestRunId}: NEW BEST hard=${Math.round(meta.hardPenalty)}, w=${Math.round(meta.weighted)}, n=${meta.hardCount}`, 'success');
-                        }
-                    }
-                }
-
-                if (!bestResult && !stopRequested) {
-                    log(`Emergency completion mode: attempting one forced complete score (may violate hard constraints).`, 'warning');
-                    totalRuns++;
-                    const runSeed = composeRunSeed(searchOpts.seedBase ?? 1337, cantusHash ^ 0x4f1bbcdc, 0, 0);
-                    const remainingRuntimeMs = Math.max(4000, GENERATE_HARD_TIMEOUT_MS - (Date.now() - optimizerStartMs) - 250);
-                    const runOpts = {
-                        ...searchOpts,
-                        relaxSet: new Set(),
-                        relaxLevel: 0,
-                        runsPerMask: 1,
-                        jitter: Math.max(4, searchOpts.jitter ?? 12),
-                        randomFn: createSeededRng(runSeed),
-                        runSeed,
-                        allowRepairHardFallback: true,
-                        searchPhase: 'balanced',
-                        enableSoftPolish: false,
-                        disableCadencePrefill: true,
-                        fixedDownbeats: null,
-                        guidedDownbeats: fixedDownbeatSkeleton || null,
-                        maxRunMs: Math.max(4000, Math.min(12000, remainingRuntimeMs))
-                    };
-                    const solver = new MixedSolver(Math.max(beam, 100), runOpts);
-                    const result = await solver.solve(sVoice, config);
-                    if (result) {
-                        const hardPenalty = hardPenaltyOnly(toRuleIdList(result.violations), new Set());
-                        const meta = scoreResult(result, 0);
-                        meta.hardPenalty = Number.isFinite(hardPenalty) ? hardPenalty : Infinity;
-                        meta.fatalCount = countFatalViolations(result.violations);
-                        meta.relaxedRules = [];
-                        meta.rejected = true;
-                        bestResult = result;
-                        bestMeta = meta;
-                        bestRunId = totalRuns;
-                        bestRelaxSet = [];
-                        log(`Emergency completion produced a full score. hard=${Math.round(meta.hardPenalty)}, w=${Math.round(meta.weighted)}, n=${meta.hardCount}`, 'warning');
                     }
                 }
 
