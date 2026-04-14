@@ -266,7 +266,7 @@
             25: 1400, // Stagnation
             26: 2000, // Tonwiederholung
             27: 2500, 28: 5000, 29: 50,
-            30: 5000, 31: 5000, 32: 800, 33: 2000,
+            30: 5000, 31: 3000, 32: 800, 33: 2000,
             // NEW RULES (Artinfuser-compliant)
             34: 7000, // Unison on Downbeat (except first/last)
             35: 7000, // Voice Crossing (non-adjacent only)
@@ -5400,7 +5400,7 @@
                                     // (betterMeta), preventing "locally better, globally worse".
                                     const melodicPressureFactor = hardOnlyPhase ? 0.15 : 0.12;
                                     const tonalPressureFactor = 0.15;
-                                    const goalPressureFactor = softFocusPhase ? 0.02 : 0.0;
+                                    const goalPressureFactor = softFocusPhase ? 0.02 : 0.01;
                                     const effectiveCost =
                                         searchPenalty +
                                         (melodicPressure * melodicPressureFactor) +
@@ -7044,16 +7044,21 @@
                 // RULE 70: IMPROPER DOUBLING
                 // 1. Never double the Leading Tone (Fatal/High)
                 // 2. In 6/3 chords, do not double the Bass (Medium)
+                // Only check on structural beats (0, 2); weak-beat SP3 passing
+                // tones may briefly double the LT without being a real error.
                 setSource('checkVertical.rule70_doubling');
                 const bassPC = actualBass % 12;
                 const sd = getScaleDegrees(tonic);
+                const r70Beat = idx % 4;
 
                 // Check Leading Tone Doubling
-                let ltCount = 0;
-                for (let i of activeIndices) {
-                    if ((currChord[i] % 12) === sd.n7) ltCount++;
+                if (r70Beat === 0 || r70Beat === 2) {
+                    let ltCount = 0;
+                    for (let i of activeIndices) {
+                        if ((currChord[i] % 12) === sd.n7) ltCount++;
+                    }
+                    if (ltCount > 1) vList.push(70);
                 }
-                if (ltCount > 1) vList.push(70);
 
                 // Check 6/3 Bass Doubling
                 // 6/3 is identified by 3rd and 6th intervals from bass, no 5th.
@@ -7061,8 +7066,8 @@
                 const has6thInt = intervalsFromBass.some(i => i === 8 || i === 9); // 6th is 8/9 semitones
                 const has5thInt = intervalsFromBass.some(i => i === 7);
 
-                if (has3rdInt && has6thInt && !has5thInt) {
-                    // It is a 6/3 chord (First Inversion)
+                if ((r70Beat === 0 || r70Beat === 2) && has3rdInt && has6thInt && !has5thInt) {
+                    // It is a 6/3 chord (First Inversion) on a structural beat
                     let bassCount = 0;
                     for (let i of activeIndices) {
                         if ((currChord[i] % 12) === bassPC) bassCount++;
