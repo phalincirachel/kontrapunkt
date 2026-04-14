@@ -7584,7 +7584,7 @@
                         const v1Moved = n1Curr !== n1Prev;
                         const v2Moved = n2Curr !== n2Prev;
 
-                        if (v1Moved || v2Moved) {
+                        if (v1Moved && v2Moved) {
                             // Check intervening notes for contrary motion
                             let hasContraryMotion = false;
                             for (let k = prevIdx + 1; k < idx; k++) {
