@@ -6006,7 +6006,9 @@
                         const dominant = (tonic + 7) % 12;
                         const subdominant = (tonic + 5) % 12;
                         const relative = isMinor ? ((tonic + 3) % 12) : ((tonic + 9) % 12);
-                        const allowed = new Set([tonic, dominant, subdominant, relative]);
+                        const supertonic = (tonic + 2) % 12;   // ii in major, ii° in minor
+                        const subtonic = (tonic + 10) % 12;    // VII in minor/dorian
+                        const allowed = new Set([tonic, dominant, subdominant, relative, supertonic, subtonic]);
                         if (!allowed.has(root)) {
                             pushRule(85, 'checkRules.rule85_remoteRoot');
                         }
