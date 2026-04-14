@@ -6532,7 +6532,10 @@
                                     const p1 = prevChord[v];
                                     const p2 = (idx >= 2) ? grid[idx - 2][v] : null;
 
-                                    if (p0 !== null && p1 !== null && p2 !== null) {
+                                    // Only check if the voice actually moved into the dissonance
+                                    // (not if the bass moved under a held note)
+                                    const voiceMoved = (p1 !== null && p2 !== null && p1 !== p2);
+                                    if (voiceMoved && p0 !== null && p1 !== null && p2 !== null) {
                                         const dir1 = Math.sign(p1 - p2);
                                         const dir2 = Math.sign(p0 - p1);
                                         const stepSize = Math.abs(p0 - p1);
@@ -7075,9 +7078,15 @@
                         if ((currChord[i] % 12) === bassPC) bassCount++;
                     }
                     if (bassCount > 1) {
-                        // Doubling the bass in a 6/3 chord is doubling the 3rd -> DUBIOUS
-                        // Exceptions exist, but generally avoided in strict style
-                        vList.push(70);
+                        // Doubling the bass in a 6/3 chord is doubling the 3rd.
+                        // Only penalize when the doubled note is the leading tone
+                        // or a tendency tone. Doubling tonic/dominant/subdominant
+                        // 3rds is acceptable in practice.
+                        const isLT = (bassPC === sd.n7);
+                        const isTendency = (bassPC === sd.n7 || bassPC === ((tonic + 6) % 12)); // LT or tritone
+                        if (isTendency) {
+                            vList.push(70);
+                        }
                     }
                 }
 
