@@ -5034,8 +5034,8 @@
                     const inCadenceWindow = step >= (totalSteps - 8);
                     const leap = Math.abs(note - prev);
 
-                    // Avoid very large leaps outside cadence when alternatives exist.
-                    if (!inCadenceWindow && leap > 7) return true;
+                    // Avoid tritones, 7ths, and very large leaps outside cadence when alternatives exist.
+                    if (!inCadenceWindow && (leap === 6 || leap >= 10)) return true;
 
                     const stride = (mode === 'sp1') ? 4 : (mode === 'sp2' ? 2 : 1);
                     const prevOnsetIdx = step - stride;
