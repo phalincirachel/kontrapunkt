@@ -217,12 +217,12 @@
         <h3>2. Settings</h3>
         <div class="voice-row" style="justify-content: space-between;">
             <label>Beam Width (Advanced):
-                <input type="number" id="beamWidthInput" value="50" min="1" max="10000"
+                <input type="number" id="beamWidthInput" value="120" min="1" max="10000"
                     style="margin-left: 10px; width: 80px; padding: 5px; background: #222; border: 1px solid #444; color: #eee;">
             </label>
         </div>
         <div style="color: #999; font-size: 12px; margin-top: 6px;">
-            Empfehlung: 50-90. Hoeher = mehr Suchbreite (oft besser), aber langsamer.
+            Empfehlung: 90-150. Standard: 120. Hoeher = mehr Suchbreite (oft besser), aber langsamer.
         </div>
 
 
@@ -454,7 +454,7 @@
         const RULE_POLICY_BASE = {
             2: { hard: true, fatalTier: 'severe', relaxTier: 999, hardRelaxTier: 4, pdf: '?54' },
             3: { hard: true, fatalTier: 'absolute', relaxTier: 999, hardRelaxTier: 6, pdf: '?42/?44' },
-            6: { hard: true, fatalTier: 'severe', relaxTier: 999, hardRelaxTier: 5, pdf: '?55' },
+            6: { hard: true, fatalTier: 'absolute', relaxTier: 999, hardRelaxTier: 5, pdf: '?55' },
             13: { hard: true, fatalTier: 'severe', relaxTier: 999, hardRelaxTier: 3, pdf: '?57' },
             16: { hard: false, relaxTier: 1, pdf: '?35/?36' },
             27: { hard: false, relaxTier: 2, pdf: '?50' },
@@ -8647,9 +8647,9 @@
                     runsPerMask: Math.max(1, Math.min(4, learned.runsPerMask ?? SEARCH_OPTS_DEFAULTS.runsPerMask)),
                     backtrackLimit: Math.max(4, Math.min(20, learned.backtrackLimit ?? SEARCH_OPTS_DEFAULTS.backtrackLimit))
                 } : {}),
-                beamBase: clampBeam(beam * beamScaleBase, 6, 30),
-                beamDownbeat: clampBeam(beam * beamScaleDownbeat, 18, 64),
-                beamCadence: clampBeam(beam * beamScaleCadence, 32, 96)
+                beamBase: clampBeam(beam * beamScaleBase, 6, 40),
+                beamDownbeat: clampBeam(beam * beamScaleDownbeat, 18, 80),
+                beamCadence: clampBeam(beam * beamScaleCadence, 32, 128)
             };
 
             if (learned) {
