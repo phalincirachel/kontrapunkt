@@ -4644,6 +4644,21 @@
                             const ltCount = rowPcs.filter(x => x === leadingTonePc).length;
                             if (ltCount >= 1) score -= 2;
                         }
+
+                        // Prefer root-position bass on strong beats: penalize notes
+                        // that form a perfect 4th below an upper voice (= 6-4 chord).
+                        if (isStrongBeat && voiceId === 3 && row) {
+                            for (let u = 0; u < row.length; u++) {
+                                if (u === voiceId) continue;
+                                const upper = row[u];
+                                if (upper === null || upper === undefined) continue;
+                                if (upper > note && ((upper - note) % 12) === 5) {
+                                    score -= 5;
+                                    break;
+                                }
+                            }
+                        }
+
                         return score;
                     };
 
