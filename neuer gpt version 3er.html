@@ -4717,15 +4717,45 @@
                             if (ltCount >= 1) score -= 2;
                         }
 
-                        // 7. ROOT-POSITION PREFERENCE for bass on strong beats
-                        if (isStrongBeat && voiceId === 3 && row) {
+                        // 7. SIX-FOUR CHORD AVOIDANCE (Rule 83) on strong beats.
+                        //    A 6-4 chord has bass + P4 above + 6th above.
+                        //    Check if our candidate would complete or contribute
+                        //    to such a configuration. Skip cadential zone
+                        //    (last 8 steps) where I6/4 -> V -> I is standard.
+                        const totalStepsApprox = Array.isArray(gridCtx) ? gridCtx.length : 0;
+                        const inCadentialZone = (totalStepsApprox > 0) && (step >= totalStepsApprox - 8);
+                        if (isStrongBeat && !inCadentialZone && row) {
+                            // Build a hypothetical row with this candidate inserted
+                            let bass = null;
+                            let bassIdx = -1;
                             for (let u = 0; u < row.length; u++) {
-                                if (u === voiceId) continue;
-                                const upper = row[u];
-                                if (upper === null || upper === undefined) continue;
-                                if (upper > note && ((upper - note) % 12) === 5) {
-                                    score -= 5;
-                                    break;
+                                const pitch = (u === voiceId) ? note : row[u];
+                                if (pitch === null || pitch === undefined) continue;
+                                if (bass === null || pitch < bass) { bass = pitch; bassIdx = u; }
+                            }
+                            if (bass !== null) {
+                                let hasFourth = false, hasSixth = false;
+                                for (let u = 0; u < row.length; u++) {
+                                    if (u === bassIdx) continue;
+                                    const pitch = (u === voiceId) ? note : row[u];
+                                    if (pitch === null || pitch === undefined) continue;
+                                    const iv = ((pitch - bass) % 12 + 12) % 12;
+                                    if (iv === 5) hasFourth = true;
+                                    else if (iv === 8 || iv === 9) hasSixth = true;
+                                }
+                                if (hasFourth && hasSixth) {
+                                    // Full 6-4 with all placed voices. Strong penalty.
+                                    score -= 12;
+                                }
+                                else if (hasFourth && bassIdx === voiceId) {
+                                    // We're the bass and an upper voice is a P4 above:
+                                    // partial-chord warning (might become 6-4).
+                                    score -= 4;
+                                }
+                                else if (hasFourth && voiceId !== bassIdx) {
+                                    // We just placed a P4 above a fixed bass:
+                                    // dangerous move -- could become 6-4.
+                                    score -= 3;
                                 }
                             }
                         }
