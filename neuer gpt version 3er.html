@@ -217,12 +217,12 @@
         <h3>2. Settings</h3>
         <div class="voice-row" style="justify-content: space-between;">
             <label>Beam Width (Advanced):
-                <input type="number" id="beamWidthInput" value="50" min="1" max="10000"
+                <input type="number" id="beamWidthInput" value="120" min="1" max="10000"
                     style="margin-left: 10px; width: 80px; padding: 5px; background: #222; border: 1px solid #444; color: #eee;">
             </label>
         </div>
         <div style="color: #999; font-size: 12px; margin-top: 6px;">
-            Empfehlung: 50-90. Hoeher = mehr Suchbreite (oft besser), aber langsamer.
+            Empfehlung: 90-150. Standard: 120. Hoeher = mehr Suchbreite (oft besser), aber langsamer.
         </div>
 
 
@@ -454,7 +454,7 @@
         const RULE_POLICY_BASE = {
             2: { hard: true, fatalTier: 'severe', relaxTier: 999, hardRelaxTier: 4, pdf: '?54' },
             3: { hard: true, fatalTier: 'absolute', relaxTier: 999, hardRelaxTier: 6, pdf: '?42/?44' },
-            6: { hard: true, fatalTier: 'severe', relaxTier: 999, hardRelaxTier: 5, pdf: '?55' },
+            6: { hard: true, fatalTier: 'absolute', relaxTier: 999, hardRelaxTier: 5, pdf: '?55' },
             13: { hard: true, fatalTier: 'severe', relaxTier: 999, hardRelaxTier: 3, pdf: '?57' },
             16: { hard: false, relaxTier: 1, pdf: '?35/?36' },
             27: { hard: false, relaxTier: 2, pdf: '?50' },
@@ -4601,15 +4601,25 @@
 
                 const row = Array.isArray(gridCtx[step]) ? gridCtx[step] : null;
                 const prevRow = (step > 0 && Array.isArray(gridCtx[step - 1])) ? gridCtx[step - 1] : null;
+                const prevPrevRow = (step >= 2 && Array.isArray(gridCtx[step - 2])) ? gridCtx[step - 2] : null;
                 const prevNote = prevRow ? prevRow[voiceId] : null;
-                const sopranoNow = row ? row[0] : null;
-                const sopranoPrev = prevRow ? prevRow[0] : null;
-                const sopranoDir = (sopranoNow !== null && sopranoNow !== undefined && sopranoPrev !== null && sopranoPrev !== undefined)
-                    ? Math.sign(sopranoNow - sopranoPrev)
-                    : 0;
                 const beatInMeasure = step % 4;
                 const isStrongBeat = (beatInMeasure === 0 || beatInMeasure === 2);
                 const leadingTonePc = (tonic + 11) % 12;
+
+                // Collect motion directions for all already-placed voices
+                const otherVoiceDirs = [];
+                if (prevRow && row) {
+                    for (let v = 0; v < 4; v++) {
+                        if (v === voiceId) continue;
+                        const curr = row[v], prev = prevRow[v];
+                        if (curr !== null && curr !== undefined && prev !== null && prev !== undefined) {
+                            otherVoiceDirs.push({ v, dir: Math.sign(curr - prev), curr, prev });
+                        }
+                    }
+                }
+
+                // Collect already-placed notes in current row for consonance + doubling checks
                 const rowPcs = row
                     ? row.filter(n => n !== null && n !== undefined).map(n => ((n % 12) + 12) % 12)
                     : [];
@@ -4617,33 +4627,139 @@
                 const ranked = [...domain].sort((a, b) => {
                     const scoreOne = (note) => {
                         let score = 0;
-                        if (prevNote !== null && prevNote !== undefined) {
-                            const motion = note - prevNote;
-                            const absMotion = Math.abs(motion);
-                            if (absMotion === 0) score -= 4;
-                            else if (absMotion <= 2) score += 3;
-                            else if (absMotion <= 4) score += 1;
-                            else if (absMotion <= 7) score += 0.5;
-                            else score -= Math.min(3, (absMotion - 7));
+                        const myDir = (prevNote !== null && prevNote !== undefined)
+                            ? Math.sign(note - prevNote) : 0;
+                        const myMotion = (prevNote !== null && prevNote !== undefined)
+                            ? Math.abs(note - prevNote) : 0;
 
-                            if (sopranoDir !== 0) {
-                                const thisDir = Math.sign(motion);
-                                if (thisDir === -sopranoDir) score += 2;
-                                else if (thisDir === sopranoDir) score -= 1.5;
+                        // 1. MELODIC QUALITY: prefer stepwise, penalize static and large leaps
+                        if (prevNote !== null && prevNote !== undefined) {
+                            if (myMotion === 0) score -= 4;
+                            else if (myMotion <= 2) score += 3;
+                            else if (myMotion <= 4) score += 1;
+                            else if (myMotion <= 7) score += 0.5;
+                            else score -= Math.min(3, (myMotion - 7));
+                        }
+
+                        // 2. CONTRARY MOTION with ALL voices (not just soprano).
+                        //    Contrary motion is the gold standard of counterpoint.
+                        //    Similar/parallel motion to multiple voices is a red flag.
+                        if (myDir !== 0 && otherVoiceDirs.length > 0) {
+                            let contraryCount = 0, parallelCount = 0;
+                            for (const o of otherVoiceDirs) {
+                                if (o.dir === -myDir) contraryCount++;
+                                else if (o.dir === myDir) parallelCount++;
+                            }
+                            score += contraryCount * 1.5;
+                            score -= parallelCount * 1.0;
+                        }
+
+                        // 3. PARALLEL PERFECT AVOIDANCE with all placed voices.
+                        //    If this note would create a parallel 5th or 8ve with
+                        //    any voice from the previous step, heavily penalize.
+                        if (prevRow && row) {
+                            for (const o of otherVoiceDirs) {
+                                const otherNow = o.curr;
+                                const otherPrev = o.prev;
+                                const intervalNow = ((note - otherNow) % 12 + 12) % 12;
+                                const intervalPrev = ((prevNote - otherPrev) % 12 + 12) % 12;
+                                const isPerfectNow = (intervalNow === 0 || intervalNow === 7);
+                                const isPerfectPrev = (intervalPrev === 0 || intervalPrev === 7);
+                                // Parallel perfect: same interval type, both voices moved
+                                if (isPerfectNow && isPerfectPrev && prevNote !== null &&
+                                    (note !== prevNote || otherNow !== otherPrev)) {
+                                    score -= 8;  // Heavy penalty for parallel perfects
+                                }
+                                // Similar motion into perfect interval (hidden parallel)
+                                else if (isPerfectNow && myDir !== 0 && myDir === o.dir) {
+                                    score -= 3;
+                                }
                             }
                         }
 
-                        if (isStrongBeat && sopranoNow !== null && sopranoNow !== undefined) {
-                            const usesBass = (voiceId === 3);
-                            if (FuxUtils.isConsonant(note, sopranoNow, usesBass)) score += 2;
-                            else score -= 2;
+                        // 4. STRUCTURAL PARALLEL AVOIDANCE (cross-measure).
+                        //    Check same-beat position 2 steps back for parallel 5th/8ve.
+                        if (isStrongBeat && prevPrevRow && row) {
+                            for (let v = 0; v < 4; v++) {
+                                if (v === voiceId) continue;
+                                const otherNow = row[v];
+                                const otherBack = prevPrevRow[v];
+                                const myBack = prevPrevRow[voiceId];
+                                if (otherNow === null || otherNow === undefined) continue;
+                                if (otherBack === null || otherBack === undefined) continue;
+                                if (myBack === null || myBack === undefined) continue;
+                                const intNow = ((note - otherNow) % 12 + 12) % 12;
+                                const intBack = ((myBack - otherBack) % 12 + 12) % 12;
+                                if ((intNow === 0 && intBack === 0) || (intNow === 7 && intBack === 7)) {
+                                    if (note !== myBack || otherNow !== otherBack) {
+                                        score -= 6;  // Strong penalty for structural parallels
+                                    }
+                                }
+                            }
                         }
 
+                        // 5. CONSONANCE with ALL placed voices on strong beats
+                        if (isStrongBeat && row) {
+                            for (let v = 0; v < 4; v++) {
+                                if (v === voiceId) continue;
+                                const other = row[v];
+                                if (other === null || other === undefined) continue;
+                                const isBassInterval = (voiceId === 3 || v === 3);
+                                if (FuxUtils.isConsonant(note, other, isBassInterval)) score += 1;
+                                else score -= 1.5;
+                            }
+                        }
+
+                        // 6. LEADING TONE doubling avoidance
                         const pc = ((note % 12) + 12) % 12;
                         if (pc === leadingTonePc) {
                             const ltCount = rowPcs.filter(x => x === leadingTonePc).length;
                             if (ltCount >= 1) score -= 2;
                         }
+
+                        // 7. SIX-FOUR CHORD AVOIDANCE (Rule 83) on strong beats.
+                        //    A 6-4 chord has bass + P4 above + 6th above.
+                        //    Check if our candidate would complete or contribute
+                        //    to such a configuration. Skip cadential zone
+                        //    (last 8 steps) where I6/4 -> V -> I is standard.
+                        const totalStepsApprox = Array.isArray(gridCtx) ? gridCtx.length : 0;
+                        const inCadentialZone = (totalStepsApprox > 0) && (step >= totalStepsApprox - 8);
+                        if (isStrongBeat && !inCadentialZone && row) {
+                            // Build a hypothetical row with this candidate inserted
+                            let bass = null;
+                            let bassIdx = -1;
+                            for (let u = 0; u < row.length; u++) {
+                                const pitch = (u === voiceId) ? note : row[u];
+                                if (pitch === null || pitch === undefined) continue;
+                                if (bass === null || pitch < bass) { bass = pitch; bassIdx = u; }
+                            }
+                            if (bass !== null) {
+                                let hasFourth = false, hasSixth = false;
+                                for (let u = 0; u < row.length; u++) {
+                                    if (u === bassIdx) continue;
+                                    const pitch = (u === voiceId) ? note : row[u];
+                                    if (pitch === null || pitch === undefined) continue;
+                                    const iv = ((pitch - bass) % 12 + 12) % 12;
+                                    if (iv === 5) hasFourth = true;
+                                    else if (iv === 8 || iv === 9) hasSixth = true;
+                                }
+                                if (hasFourth && hasSixth) {
+                                    // Full 6-4 with all placed voices. Strong penalty.
+                                    score -= 12;
+                                }
+                                else if (hasFourth && bassIdx === voiceId) {
+                                    // We're the bass and an upper voice is a P4 above:
+                                    // partial-chord warning (might become 6-4).
+                                    score -= 4;
+                                }
+                                else if (hasFourth && voiceId !== bassIdx) {
+                                    // We just placed a P4 above a fixed bass:
+                                    // dangerous move -- could become 6-4.
+                                    score -= 3;
+                                }
+                            }
+                        }
+
                         return score;
                     };
 
@@ -8647,9 +8763,9 @@
                     runsPerMask: Math.max(1, Math.min(4, learned.runsPerMask ?? SEARCH_OPTS_DEFAULTS.runsPerMask)),
                     backtrackLimit: Math.max(4, Math.min(20, learned.backtrackLimit ?? SEARCH_OPTS_DEFAULTS.backtrackLimit))
                 } : {}),
-                beamBase: clampBeam(beam * beamScaleBase, 6, 30),
-                beamDownbeat: clampBeam(beam * beamScaleDownbeat, 18, 64),
-                beamCadence: clampBeam(beam * beamScaleCadence, 32, 96)
+                beamBase: clampBeam(beam * beamScaleBase, 6, 40),
+                beamDownbeat: clampBeam(beam * beamScaleDownbeat, 18, 80),
+                beamCadence: clampBeam(beam * beamScaleCadence, 32, 128)
             };
 
             if (learned) {
